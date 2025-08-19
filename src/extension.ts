@@ -1,384 +1,201 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
 
-// This method is called when your extension is activated
-// Your extension is activated the very first time the command is executed
-export function activate(context: vscode.ExtensionContext) {
-	console.log('Congratulations, your extension "devstry-viewer" is now active!');
+import { createHash } from 'crypto';
 
-	// Helper: Get all .md files in devLog
-	async function getMarkdownFiles(): Promise<vscode.Uri[]> {
-		const workspaceFolders = vscode.workspace.workspaceFolders;
-		if (!workspaceFolders) return [];
-		const devLogUri = vscode.Uri.joinPath(workspaceFolders[0].uri, 'devLog');
-		try {
-			const files = await vscode.workspace.fs.readDirectory(devLogUri);
-			return files
-				.filter(([name, type]) => name.endsWith('.md') && type === vscode.FileType.File)
-				.map(([name]) => vscode.Uri.joinPath(devLogUri, name));
-		} catch {
-			return [];
+export function getDevlogSectionHashes(devlogPath: string): Record<string, Record<number, string>> {
+	const content = fs.readFileSync(devlogPath, 'utf8');
+	const result: Record<string, Record<number, string>> = {};
+
+	// Find all file sections
+	const fileSectionRegex = /^##\s+([^\n]+)[\s\S]*?(?=^##\s+|$)/gm;
+	let fileMatch;
+	while ((fileMatch = fileSectionRegex.exec(content)) !== null) {
+		const fileName = fileMatch[1].trim();
+		const sectionContent = fileMatch[0];
+
+		// Find all change blocks in this section
+		const changeBlockRegex = /\*\*Lines ([\d\-]+)\*\* \| \*\*(\d+) change tracked\*\*[\s\S]*?(?=\*\*Lines|\n##|$)/g;
+		let changeMatch;
+		while ((changeMatch = changeBlockRegex.exec(sectionContent)) !== null) {
+			const linesStr = changeMatch[1];
+			const lines = parseLineRange(linesStr);
+			const blockContent = changeMatch[0];
+
+			// Hash the block content
+			const hash = createHash('sha256').update(blockContent).digest('hex');
+
+			if (!result[fileName]) result[fileName] = {};
+			for (const line of lines) {
+				result[fileName][line] = hash;
+			}
 		}
 	}
+	return result;
+}
 
-	// Helper: Show markdown in webview
-	async function showMarkdownFile(uri: vscode.Uri) {
-		let panel = vscode.window.createWebviewPanel(
-			'markdownViewer',
-			`Markdown: ${uri.path.split('/').pop()}`,
+function parseLineRange(str: string): number[] {
+	// e.g. "1-2" => [1,2], "5" => [5]
+	if (str.includes('-')) {
+		const [start, end] = str.split('-').map(Number);
+		const arr = [];
+		for (let i = start; i <= end; i++) arr.push(i);
+		return arr;
+	}
+	return [Number(str)];
+}
+
+
+export function activate(context: vscode.ExtensionContext) {
+	const openChangeBrowserDisposable = vscode.commands.registerCommand('devstry-viewer.openChangeBrowser', () => {
+		const panel = vscode.window.createWebviewPanel(
+			'devlogPanel',
+			'Devlog Change',
 			vscode.ViewColumn.Two,
 			{ enableScripts: true }
 		);
-		const content = (await vscode.workspace.fs.readFile(uri)).toString();
-		const { marked } = await import('marked');
-		const htmlContent = `<html>
+
+		function getWorkspaceRoot(): string | null {
+			const folders = vscode.workspace.workspaceFolders;
+			if (!folders || folders.length === 0) return null;
+			return folders[0].uri.fsPath;
+		}
+
+		function getLatestDevlogFile(): string | null {
+			const root = getWorkspaceRoot();
+			if (!root) return null;
+			const devlogDir = path.join(root, 'devLog');
+			if (!fs.existsSync(devlogDir) || !fs.statSync(devlogDir).isDirectory()) return null;
+			const files = fs.readdirSync(devlogDir)
+				.filter(f => f.endsWith('.md'))
+				.map(f => ({ name: f, time: fs.statSync(path.join(devlogDir, f)).mtime.getTime() }))
+				.sort((a, b) => b.time - a.time);
+			return files.length > 0 ? path.join(devlogDir, files[0].name) : null;
+		}
+
+		// Parse devlog for file and line, return change block(s) for that line
+		function getChangeForLine(devlogPath: string, fileName: string, line: number): string {
+			const content = fs.readFileSync(devlogPath, 'utf8');
+			// Find section for file
+			const sectionRegex = new RegExp(`^##\\s+${escapeRegExp(fileName)}[\\s\\S]*?(?=^##\\s+|\\Z)`, 'm');
+			const sectionMatch = content.match(sectionRegex);
+			if (!sectionMatch) return 'No devlog section found for this file.';
+			const section = sectionMatch[0];
+
+			// Find all change blocks with line numbers
+			const changeBlockRegex = /\*\*Lines ([\d\-]+)\*\* \| \*\*(\d+) change tracked\*\*\n\n##### ([^\n]+)\n([\s\S]*?)(?=\n\*\*Lines|\n##|$)/g;
+			let result = '';
+			let found = false;
+			let match;
+			while ((match = changeBlockRegex.exec(section)) !== null) {
+				const linesStr = match[1]; // e.g. "1-2"
+				const lines = parseLineRange(linesStr);
+				if (lines.includes(line)) {
+					found = true;
+					result += match[0].trim() + '\n\n';
+				}
+			}
+			return found ? result : 'No tracked change for this line.';
+		}
+
+		// removed duplicate parseLineRange, now top-level
+
+		function escapeRegExp(str: string): string {
+			return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		}
+
+		const updatePanel = () => {
+			const editor = vscode.window.activeTextEditor;
+			const line = editor ? editor.selection.active.line + 1 : 1;
+			const file = editor ? vscode.workspace.asRelativePath(editor.document.uri) : '';
+			const devlogPath = getLatestDevlogFile();
+			let changeHtml = '<em>No devlog file found.</em>';
+			let hashHtml = '';
+			if (devlogPath && file) {
+				const fs = require('fs');
+				const path = require('path');
+				const marked = require('marked');
+				let devlogContent = "";
+				try {
+					devlogContent = fs.readFileSync(devlogPath, 'utf8');
+				} catch (e) {
+					console.error('[Devlog Section Debug] Failed to read devlog:', e);
+					changeHtml = `<div style="margin-top:1em;font-size:0.95em;color:#e00;">Could not read devlog file.</div>`;
+					hashHtml = "";
+					return;
+				}
+
+				// Manual section extraction for reliability
+				function escapeRegExp(str: string) {
+					return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+				}
+				const fileBasename = path.basename(file);
+				const sectionRegex = /^##\s+.*$/gm;
+				const headings: number[] = [];
+				let match;
+				while ((match = sectionRegex.exec(devlogContent)) !== null) {
+					headings.push(match.index);
+				}
+				let foundSection = "";
+				for (let i = 0; i < headings.length; i++) {
+					const headingLine = devlogContent.substring(headings[i], devlogContent.indexOf('\n', headings[i]));
+					if (headingLine.includes(fileBasename)) {
+						const start = headings[i];
+						const end = (i + 1 < headings.length) ? headings[i + 1] : devlogContent.length;
+						foundSection = devlogContent.substring(start, end);
+						break;
+					}
+				}
+
+				if (!foundSection) {
+					console.warn(`[Devlog Section Debug] No section found for file "${file}".`);
+					changeHtml = `<div style="margin-top:1em;font-size:0.95em;color:#e00;">No devlog section found for this file.</div>`;
+					hashHtml = "";
+				} else {
+					const renderedHtml = marked.parse(foundSection);
+					changeHtml = `<div style="font-size:1.05em;">${renderedHtml}</div>`;
+					hashHtml = "";
+				}
+			}
+			panel.webview.html = `
+			<!DOCTYPE html>
+			<html lang="en">
 			<head>
+				<meta charset="UTF-8">
 				<style>
 					body { font-family: sans-serif; padding: 2em; }
-					pre, code { background: #f4f4f4; padding: 2px 4px; border-radius: 3px; }
-					#popout-btn { position: absolute; top: 10px; right: 10px; padding: 6px 12px; background: #007acc; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+					.file { font-size: 1.2em; color: #333; margin-bottom: 1em; }
+					.line { font-size: 2em; color: #007acc; margin-bottom: 1em; }
+					pre { background: #f6f8fa; padding: 1em; border-radius: 6px; }
 				</style>
 			</head>
 			<body>
-				<button id="popout-btn">Pop Out</button>
-				${marked(content)}
-				<script>
-					const vscode = acquireVsCodeApi();
-					document.getElementById('popout-btn').onclick = () => {
-						vscode.postMessage({ command: 'popout' });
-					};
-				</script>
+				<div class="file">File: <strong>${file || 'No file'}</strong></div>
+				<div class="line">Current Line: <strong>${line}</strong></div>
+				${changeHtml}
+				${hashHtml}
 			</body>
-		</html>`;
-		panel.webview.html = htmlContent;
-		panel.webview.onDidReceiveMessage(async message => {
-			if (message.command === 'popout') {
-				const tmp = require('os').tmpdir();
-				const fs = require('fs');
-				const path = require('path');
-				const fileName = `devstry-viewer-${Date.now()}.html`;
-				const filePath = path.join(tmp, fileName);
-				fs.writeFileSync(filePath, htmlContent, 'utf8');
-				await vscode.env.openExternal(vscode.Uri.file(filePath));
-			}
-		});
-	}
+			</html>
+		`;
+		};
 
-	// Command: Open most recent markdown
-	const openRecentDisposable = vscode.commands.registerCommand('devstry-viewer.openRecentMarkdown', async () => {
-		const files = await getMarkdownFiles();
-		if (files.length === 0) {
-			vscode.window.showWarningMessage('No markdown files found in devLog.');
-			return;
-		}
-		let recentFile = files[0];
-		let recentStat = await vscode.workspace.fs.stat(recentFile);
-		for (const file of files) {
-			const stat = await vscode.workspace.fs.stat(file);
-			if (stat.mtime > recentStat.mtime) {
-				recentFile = file;
-				recentStat = stat;
-			}
-		}
-		await showMarkdownFile(recentFile);
+		updatePanel();
+
+		const selectionListener = vscode.window.onDidChangeTextEditorSelection(() => {
+			updatePanel();
+		});
+		const editorListener = vscode.window.onDidChangeActiveTextEditor(() => {
+			updatePanel();
+		});
+
+		panel.onDidDispose(() => {
+			selectionListener.dispose();
+			editorListener.dispose();
+		});
 	});
 
-	// Command: Select markdown file
-	const selectDisposable = vscode.commands.registerCommand('devstry-viewer.selectMarkdown', async () => {
-		const picked = await vscode.window.showOpenDialog({
-			canSelectMany: false,
-			openLabel: 'Open Markdown',
-			filters: { 'Markdown files': ['md'] }
-		});
-		if (!picked || picked.length === 0) {
-			vscode.window.showWarningMessage('No markdown file selected.');
-			return;
-		}
-		await showMarkdownFile(picked[0]);
-	});
-
-	// Hello World command (unchanged)
-	const disposable = vscode.commands.registerCommand('devstry-viewer.helloWorld', () => {
-		vscode.window.showInformationMessage('Hello World from devstry-viewer!');
-	});
-
-	context.subscriptions.push(disposable, openRecentDisposable, selectDisposable);
-	// --- Command: Show change details for current line ---
-	const showChangeDetailsDisposable = vscode.commands.registerCommand('devstry-viewer.showChangeDetailsForLine', async () => {
-		// Get active editor
-		const editor = vscode.window.activeTextEditor;
-		if (!editor) {
-			vscode.window.showWarningMessage('No active editor.');
-			return;
-		}
-		const filePath = editor.document.uri.fsPath;
-		const lineNumber = editor.selection.active.line + 1; // VSCode lines are 0-based
-
-		// Prompt user to select change tracker markdown file
-		const picked = await vscode.window.showOpenDialog({
-			canSelectMany: false,
-			openLabel: 'Select Change Tracker Markdown',
-			filters: { 'Markdown files': ['md'] }
-		});
-		if (!picked || picked.length === 0) {
-			vscode.window.showWarningMessage('No change tracker markdown file selected.');
-			return;
-		}
-		const markdownUri = picked[0];
-		const markdownContent = (await vscode.workspace.fs.readFile(markdownUri)).toString();
-
-		// Parse and lookup
-		const files = parseChangeTrackerMarkdown(markdownContent);
-		// Normalize file path for lookup (match markdown format)
-		const relPath = vscode.workspace.asRelativePath(filePath);
-		const details = getChangeDetailsForLine(files, '/' + relPath, lineNumber);
-
-		if (!details.scope) {
-			vscode.window.showInformationMessage(`No tracked changes found for ${relPath} line ${lineNumber}.`);
-			return;
-		}
-
-		// Build message
-		let msg = `Change details for ${relPath} line ${lineNumber}:\n`;
-		if (details.changeRow) {
-			msg += `- Change: ${details.changeRow.before} → ${details.changeRow.after}\n`;
-			if (details.changeRow.highlight) msg += `- Highlight: ${details.changeRow.highlight}\n`;
-		}
-		if (details.aiInsight) {
-			msg += `- AI Insight: ${details.aiInsight}\n`;
-		}
-		if (details.suggestions && details.suggestions.length > 0) {
-			msg += `- Suggestions:\n  ${details.suggestions.map(s => '- ' + s).join('\n  ')}\n`;
-		}
-		if (details.scope.explanation) {
-			msg += `- Scope Explanation: ${details.scope.explanation}\n`;
-		}
-		vscode.window.showInformationMessage(msg);
-	});
-
-	context.subscriptions.push(showChangeDetailsDisposable);
+	context.subscriptions.push(openChangeBrowserDisposable);
 }
 
-// This method is called when your extension is deactivated
-// --- Change Tracker Markdown Parser ---
-
-export interface ChangeTrackerFile {
-	filePath: string;
-	scopes: ChangeTrackerScope[];
-}
-
-export interface ChangeTrackerScope {
-	name: string;
-	lineStart: number;
-	lineEnd: number;
-	changeCount: number;
-	changes: ChangeTrackerEntry[];
-	explanation?: string;
-}
-
-export interface ChangeTrackerEntry {
-	timestamp: string;
-	changes: ChangeTableRow[];
-	aiInsight?: string;
-	suggestions?: string[];
-}
-
-export interface ChangeTableRow {
-	line: number;
-	highlight?: string; // 🟡, 🔴, 🟢
-	before: string;
-	after: string;
-}
-
-/**
- * Parses a custom change tracker markdown string and returns a structured array of ChangeTrackerFile objects.
- *
- * The markdown format tracks code changes, AI insights, and suggestions mapped to specific line numbers in source files.
- *
- * @param markdown The change tracker markdown string to parse.
- * @returns Array of ChangeTrackerFile objects, each representing a file and its tracked changes.
- *
- * Example usage:
- *   const markdown = `...`; // Load sample markdown string
- *   const files = parseChangeTrackerMarkdown(markdown);
- *   // files[0].filePath, files[0].scopes, etc.
- */
-export function parseChangeTrackerMarkdown(markdown: string): ChangeTrackerFile[] {
-	const fileRegex = /^## (.+)$/gm;
-	const scopeRegex = /\*\*(.+?)\*\* \| \*\*Lines (\d+)-(\d+)\*\* \| \*\*(\d+) change tracked\*\*/g;
-	const changeEntryRegex = /##### ([\d\-T:\.Z]+)([\s\S]*?)(?=#####|$)/g;
-	const changeTableRegex = /\| Line \| Before \| After \|([\s\S]*?)\n\n/g;
-	const aiInsightRegex = /\*\*AI Insight\*\*([\s\S]*?)(?=\*\*Suggestions\*\*|$)/;
-	const suggestionsRegex = /\*\*Suggestions\*\*([\s\S]*?)(?=\n\n|$)/;
-	const explanationRegex = /\*\*Explanation\*\*([\s\S]*?)(?=\n\n|$)/;
-
-	const files: ChangeTrackerFile[] = [];
-	let fileMatch: RegExpExecArray | null;
-	let fileSectionStart = 0;
-
-	while ((fileMatch = fileRegex.exec(markdown)) !== null) {
-		const filePath = fileMatch[1].trim();
-		const nextFileMatch = fileRegex.exec(markdown);
-		const sectionEnd = nextFileMatch ? nextFileMatch.index : markdown.length;
-		const fileSection = markdown.slice(fileMatch.index, sectionEnd);
-
-		const scopes: ChangeTrackerScope[] = [];
-		let scopeMatch: RegExpExecArray | null;
-		const scopeRegexLocal = /\*\*(.+?)\*\* \| \*\*Lines (\d+)-(\d+)\*\* \| \*\*(\d+) change tracked\*\*/g;
-		while ((scopeMatch = scopeRegexLocal.exec(fileSection)) !== null) {
-			const scopeName = scopeMatch[1].trim();
-			const lineStart = parseInt(scopeMatch[2], 10);
-			const lineEnd = parseInt(scopeMatch[3], 10);
-			const changeCount = parseInt(scopeMatch[4], 10);
-
-			// Find scope block
-			const scopeStart = scopeMatch.index;
-			const nextScopeMatch = scopeRegexLocal.exec(fileSection);
-			const scopeEnd = nextScopeMatch ? nextScopeMatch.index : fileSection.length;
-			const scopeBlock = fileSection.slice(scopeStart, scopeEnd);
-
-			// Explanation
-			let explanation: string | undefined;
-			const explanationMatch = explanationRegex.exec(scopeBlock);
-			if (explanationMatch) {
-				explanation = explanationMatch[1].trim();
-			}
-
-			// Change entries
-			const changes: ChangeTrackerEntry[] = [];
-			let changeEntryMatch: RegExpExecArray | null;
-			const changeEntryRegexLocal = /##### ([\d\-T:\.Z]+)([\s\S]*?)(?=#####|$)/g;
-			while ((changeEntryMatch = changeEntryRegexLocal.exec(scopeBlock)) !== null) {
-				const timestamp = changeEntryMatch[1].trim();
-				const entryBlock = changeEntryMatch[2];
-
-				// Change table
-				const changeTableRows: ChangeTableRow[] = [];
-				const changeTableRegexLocal = /\|([^\n]+)\|([^\n]+)\|([^\n]+)\|/g;
-				let tableRowMatch: RegExpExecArray | null;
-				const tableBlockMatch = changeTableRegex.exec(entryBlock);
-				if (tableBlockMatch) {
-					const tableBlock = tableBlockMatch[1];
-					const tableRowRegex = /\| ([^\|]+) \| `([^`]*)` \| `([^`]*)` \|/g;
-					let rowMatch: RegExpExecArray | null;
-					while ((rowMatch = tableRowRegex.exec(tableBlock)) !== null) {
-						let lineStr = rowMatch[1].trim();
-						let highlight: string | undefined;
-						let lineNum: number;
-						if (/^[🟡🔴🟢]/.test(lineStr)) {
-							highlight = lineStr[0];
-							lineStr = lineStr.slice(1).trim();
-						}
-						lineNum = parseInt(lineStr, 10);
-						changeTableRows.push({
-							line: lineNum,
-							highlight,
-							before: rowMatch[2],
-							after: rowMatch[3]
-						});
-					}
-				}
-
-				// AI Insight
-				let aiInsight: string | undefined;
-				const aiInsightMatch = aiInsightRegex.exec(entryBlock);
-				if (aiInsightMatch) {
-					aiInsight = aiInsightMatch[1].trim();
-				}
-
-				// Suggestions
-				let suggestions: string[] | undefined;
-				const suggestionsMatch = suggestionsRegex.exec(entryBlock);
-				if (suggestionsMatch) {
-					suggestions = suggestionsMatch[1]
-						.split('\n')
-						.map(s => s.replace(/^- /, '').trim())
-						.filter(s => s.length > 0);
-				}
-
-				changes.push({
-					timestamp,
-					changes: changeTableRows,
-					aiInsight,
-					suggestions
-				});
-			}
-
-			scopes.push({
-				name: scopeName,
-				lineStart,
-				lineEnd,
-				changeCount,
-				changes,
-				explanation
-			});
-		}
-
-		files.push({
-			filePath,
-			scopes
-		});
-	}
-
-	return files;
-}
-
-// --- Sample usage for testing ---
-// const markdown = `...`; // Load sample markdown string
-// const parsed = parseChangeTrackerMarkdown(markdown);
-// console.log(JSON.stringify(parsed, null, 2));
 export function deactivate() { }
-
-// --- Utility: Get change details for file and line number ---
-
-/**
- * Finds the change details for a given file path and line number.
- * Returns: { scope, changeEntry, changeRow, aiInsight, suggestions }
- */
-/**
- * Finds the change details for a given file path and line number.
- * @param files Parsed change tracker files from parseChangeTrackerMarkdown().
- * @param filePath The file path to look up.
- * @param lineNumber The line number to look up.
- * @returns Object containing scope, changeEntry, changeRow, aiInsight, suggestions.
- *
- * Example usage:
- *   const details = getChangeDetailsForLine(files, '/src/app.js', 34);
- *   // details.scope, details.changeEntry, details.changeRow, details.aiInsight, details.suggestions
- */
-export function getChangeDetailsForLine(
-	files: ChangeTrackerFile[],
-	filePath: string,
-	lineNumber: number
-): {
-	scope?: ChangeTrackerScope;
-	changeEntry?: ChangeTrackerEntry;
-	changeRow?: ChangeTableRow;
-	aiInsight?: string;
-	suggestions?: string[];
-} {
-	const file = files.find(f => f.filePath === filePath);
-	if (!file) return {};
-
-	for (const scope of file.scopes) {
-		if (lineNumber >= scope.lineStart && lineNumber <= scope.lineEnd) {
-			for (const entry of scope.changes) {
-				for (const row of entry.changes) {
-					if (row.line === lineNumber) {
-						return {
-							scope,
-							changeEntry: entry,
-							changeRow: row,
-							aiInsight: entry.aiInsight,
-							suggestions: entry.suggestions
-						};
-					}
-				}
-			}
-			// If no exact match, return scope info
-			return { scope };
-		}
-	}
-	return {};
-}

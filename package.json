@@ -24,6 +24,10 @@
       {
         "command": "devstry-viewer.selectMarkdown",
         "title": "Select Markdown File"
+      },
+      {
+        "command": "devstry-viewer.openChangeBrowser",
+        "title": "Open Change Browser"
       }
     ]
   },
