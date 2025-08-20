@@ -1,49 +1,79 @@
+// Devlog-specific utilities
 import * as fs from 'fs';
-import { createHash } from 'crypto';
+import * as path from 'path';
 
 /**
- * Parses a line range string (e.g. "1-2" => [1,2], "5" => [5])
+ * Parses a line range string like "1-3,5" into an array of numbers: [1,2,3,5]
  */
 export function parseLineRange(str: string): number[] {
-    if (str.includes('-')) {
-        const [start, end] = str.split('-').map(Number);
-        const arr = [];
-        for (let i = start; i <= end; i++) arr.push(i);
-        return arr;
-    }
-    return [Number(str)];
-}
-
-/**
- * Returns a mapping of file sections and line hashes from a devlog markdown file.
- */
-export function getDevlogSectionHashes(devlogPath: string): Record<string, Record<number, string>> {
-    const content = fs.readFileSync(devlogPath, 'utf8');
-    const result: Record<string, Record<number, string>> = {};
-
-    // Find all file sections
-    const fileSectionRegex = /^##\s+([^\n]+)[\s\S]*?(?=^##\s+|$)/gm;
-    let fileMatch;
-    while ((fileMatch = fileSectionRegex.exec(content)) !== null) {
-        const fileName = fileMatch[1].trim();
-        const sectionContent = fileMatch[0];
-
-        // Find all change blocks in this section
-        const changeBlockRegex = /\*\*Lines ([\d\-]+)\*\* \| \*\*(\d+) change tracked\*\*[\s\S]*?(?=\*\*Lines|\n##|$)/g;
-        let changeMatch;
-        while ((changeMatch = changeBlockRegex.exec(sectionContent)) !== null) {
-            const linesStr = changeMatch[1];
-            const lines = parseLineRange(linesStr);
-            const blockContent = changeMatch[0];
-
-            // Hash the block content
-            const hash = createHash('sha256').update(blockContent).digest('hex');
-
-            if (!result[fileName]) result[fileName] = {};
-            for (const line of lines) {
-                result[fileName][line] = hash;
-            }
+    const result: number[] = [];
+    for (const part of str.split(',')) {
+        if (part.includes('-')) {
+            const [start, end] = part.split('-').map(Number);
+            for (let i = start; i <= end; i++) { result.push(i); }
+        } else {
+            result.push(Number(part));
         }
     }
     return result;
+}
+
+/**
+ * Extracts the devlog section for a given file from the devlog markdown content.
+ * Returns the section as a string, or empty string if not found.
+ */
+export function getDevlogSection(content: string, fileName: string): string {
+    // Split content by lines for more precise control
+    const lines = content.split('\n');
+    const startPattern = new RegExp(`^[ \\t]*##\\s+.*${escapeRegExp(fileName)}(?:\\s|$)`);
+
+    let startIndex = -1;
+    let endIndex = lines.length;
+
+    // Find the start of our section
+    for (let i = 0; i < lines.length; i++) {
+        if (startPattern.test(lines[i])) {
+            startIndex = i;
+            break;
+        }
+    }
+
+    if (startIndex === -1) return '';
+
+    // Find the end of our section (next ## that starts with a path)
+    const nextSectionPattern = /^[ \t]*##\s+\/.*$/;
+    for (let i = startIndex + 1; i < lines.length; i++) {
+        if (nextSectionPattern.test(lines[i])) {
+            endIndex = i;
+            break;
+        }
+    }
+
+    return lines.slice(startIndex, endIndex).join('\n');
+}
+
+/**
+ * Escapes RegExp special characters in a string.
+ */
+export function escapeRegExp(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+/**
+ * Safely reads a devlog file and returns its content, or undefined if error.
+ */
+export function readDevlogFileSafe(devlogPath: string): string | undefined {
+    try {
+        return fs.readFileSync(devlogPath, 'utf8');
+    } catch (e) {
+        console.error('[DevlogUtils] Failed to read devlog file:', e);
+        return undefined;
+    }
+}
+
+/**
+ * Returns all markdown files in the given devlog directory, or empty array if none.
+ */
+export function getDevlogMarkdownFiles(devlogDir: string): string[] {
+    if (!fs.existsSync(devlogDir) || !fs.statSync(devlogDir).isDirectory()) return [];
+    return fs.readdirSync(devlogDir).filter(f => f.endsWith('.md'));
 }

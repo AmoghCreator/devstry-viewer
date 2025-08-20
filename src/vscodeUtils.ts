@@ -1,34 +1,63 @@
+// VS Code workspace and file utilities
+
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import { escapeRegExp } from './devlogUtils';
 
 /**
- * Returns the root path of the current workspace, or null if not available.
+ * Returns the workspace root folder path, or undefined if not open.
  */
-export function getWorkspaceRoot(): string | null {
+export function getWorkspaceRoot(): string | undefined {
     const folders = vscode.workspace.workspaceFolders;
-    if (!folders || folders.length === 0) return null;
-    return folders[0].uri.fsPath;
+    return folders && folders.length > 0 ? folders[0].uri.fsPath : undefined;
 }
 
 /**
- * Returns the path to the latest devlog markdown file in the devLog directory, or null if not found.
+ * Finds the latest devlog markdown file in the workspace's devLog directory.
+ * Returns the file path, or undefined if not found.
  */
-export function getLatestDevlogFile(): string | null {
+export function getLatestDevlogFile(): string | undefined {
     const root = getWorkspaceRoot();
-    if (!root) return null;
+    if (!root) return undefined;
     const devlogDir = path.join(root, 'devLog');
-    if (!fs.existsSync(devlogDir) || !fs.statSync(devlogDir).isDirectory()) return null;
+    if (!fs.existsSync(devlogDir) || !fs.statSync(devlogDir).isDirectory()) return undefined;
     const files = fs.readdirSync(devlogDir)
         .filter(f => f.endsWith('.md'))
         .map(f => ({ name: f, time: fs.statSync(path.join(devlogDir, f)).mtime.getTime() }))
         .sort((a, b) => b.time - a.time);
-    return files.length > 0 ? path.join(devlogDir, files[0].name) : null;
+    return files.length > 0 ? path.join(devlogDir, files[0].name) : undefined;
+}
+
+// Re-export escapeRegExp for convenience
+export { escapeRegExp };
+
+/**
+ * Shows a warning message if the condition is true, returns true if warning was shown.
+ */
+export function showWarningIf(condition: boolean, message: string): boolean {
+    if (condition) {
+        vscode.window.showWarningMessage(message);
+        return true;
+    }
+    return false;
 }
 
 /**
- * Escapes RegExp special characters in a string.
+ * Returns the path to a subdirectory in the workspace root, or shows a warning if not found.
+ * @param subdir Name of the subdirectory (e.g. 'devLog')
+ * @param missingMsg Message to show if missing
  */
-export function escapeRegExp(str: string): string {
-    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+export function getWorkspaceSubdirOrWarn(subdir: string, missingMsg: string): string | undefined {
+    const root = getWorkspaceRoot();
+    if (!root) {
+        vscode.window.showWarningMessage('No workspace folder found.');
+        return undefined;
+    }
+    const dir = path.join(root, subdir);
+    if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
+        vscode.window.showWarningMessage(missingMsg);
+        return undefined;
+    }
+    return dir;
 }

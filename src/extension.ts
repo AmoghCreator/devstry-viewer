@@ -1,53 +1,112 @@
+/**
+ * Main entry point for the Devstry Viewer VSCode extension.
+ * Provides commands for browsing and selecting devlog markdown files.
+ */
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { createHash } from 'crypto';
+// Devlog utilities
+import { getDevlogSection, parseLineRange, readDevlogFileSafe, getDevlogMarkdownFiles } from './devlogUtils';
+// Workspace and messaging utilities
+import { getWorkspaceRoot, getLatestDevlogFile, escapeRegExp, showWarningIf, getWorkspaceSubdirOrWarn } from './vscodeUtils';
 
-export function getDevlogSectionHashes(devlogPath: string): Record<string, Record<number, string>> {
-	const content = fs.readFileSync(devlogPath, 'utf8');
-	const result: Record<string, Record<number, string>> = {};
 
-	// Find all file sections
-	const fileSectionRegex = /^##\s+([^\n]+)[\s\S]*?(?=^##\s+|$)/gm;
-	let fileMatch;
-	while ((fileMatch = fileSectionRegex.exec(content)) !== null) {
-		const fileName = fileMatch[1].trim();
-		const sectionContent = fileMatch[0];
+/**
+ * Returns the HTML for the devlog webview panel for a given file and line.
+ * @param file Relative path to the file being viewed.
+ * @param line Line number in the file.
+ * @returns HTML string for the webview panel.
+ */
+function getDevlogPanelHtml(file: string, line: number): string {
+	const devlogPath = getLatestDevlogFile();
+	let cardsHtml = '<em>No devlog file found.</em>';
 
-		// Find all change blocks in this section
-		const changeBlockRegex = /\*\*Lines ([\d\-]+)\*\* \| \*\*(\d+) change tracked\*\*[\s\S]*?(?=\*\*Lines|\n##|$)/g;
-		let changeMatch;
-		while ((changeMatch = changeBlockRegex.exec(sectionContent)) !== null) {
-			const linesStr = changeMatch[1];
-			const lines = parseLineRange(linesStr);
-			const blockContent = changeMatch[0];
+	/**
+	 * Splits a devlog section into card entries.
+	 * Each card starts with a timestamp header: "##### YYYY-MM-DDTHH:MM:SS.sssZ"
+	 */
+	function splitDevlogSectionToCards(section: string): string[] {
+		const cardRegex = /##### \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z[\s\S]*?(?=(?:\n##### \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)|$)/g;
+		const cards: string[] = [];
+		let match;
+		while ((match = cardRegex.exec(section)) !== null) {
+			cards.push(match[0].trim());
+		}
+		return cards;
+	}
 
-			// Hash the block content
-			const hash = createHash('sha256').update(blockContent).digest('hex');
-
-			if (!result[fileName]) result[fileName] = {};
-			for (const line of lines) {
-				result[fileName][line] = hash;
+	if (devlogPath && file) {
+		const devlogContent = readDevlogFileSafe(devlogPath);
+		if (!devlogContent) {
+			cardsHtml = `<div style="margin-top:1em;font-size:0.95em;color:#e00;">Could not read devlog file.</div>`;
+		} else {
+			const section = getDevlogSection(devlogContent, file);
+			if (!section) {
+				cardsHtml = `<div style="margin-top:1em;font-size:0.95em;color:#e00;">No devlog section found for this file.</div>`;
+			} else {
+				const cards = splitDevlogSectionToCards(section);
+				if (cards.length === 0) {
+					cardsHtml = `<div style="margin-top:1em;font-size:0.95em;color:#e00;">No devlog cards found for this file.</div>`;
+				} else {
+					cardsHtml = `
+						<div id="devlog-card-container" style="display: flex; overflow-x: auto; gap: 1.5em; padding-bottom: 1em;">
+							${cards.map(card => `
+								<div class="devlog-card" style="min-width:350px; max-width:400px; background:#fff; border-radius:10px; box-shadow:0 2px 8px #0002; padding:1em; margin-bottom:1em; flex:0 0 auto;">
+									<div class="markdown-body">${card}</div>
+								</div>
+							`).join('')}
+						</div>
+					`;
+				}
 			}
 		}
 	}
-	return result;
+
+	return `
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body { font-family: sans-serif; padding: 2em; background: #f4f6fa; }
+                .file { font-size: 1.2em; color: #333; margin-bottom: 1em; }
+                .line { font-size: 2em; color: #007acc; margin-bottom: 1em; }
+                #devlog-card-container { scrollbar-width: thin; scrollbar-color: #007acc #e0e0e0; }
+                .devlog-card { transition: box-shadow 0.2s; }
+                .devlog-card:hover { box-shadow: 0 4px 16px #007acc33; }
+                /* Github markdown style (minimal) */
+                .markdown-body table { border-collapse: collapse; width: 100%; margin-bottom: 1em; }
+                .markdown-body th, .markdown-body td { border: 1px solid #ddd; padding: 4px 8px; }
+                .markdown-body th { background: #f6f8fa; }
+                .markdown-body code { background: #f6f8fa; border-radius: 4px; padding: 2px 4px; }
+                .markdown-body { font-size: 0.98em; }
+            </style>
+            <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+            <script>
+                window.addEventListener('DOMContentLoaded', () => {
+                    document.querySelectorAll('.markdown-body').forEach(el => {
+                        const raw = el.textContent;
+                        el.innerHTML = marked.parse(raw, { gfm: true });
+                    });
+                });
+            </script>
+        </head>
+        <body>
+            <div class="file">File: <strong>${file || 'No file'}</strong></div>
+            <div class="line">Current Line: <strong>${line}</strong></div>
+            ${cardsHtml}
+        </body>
+        </html>
+    `;
 }
 
-function parseLineRange(str: string): number[] {
-	// e.g. "1-2" => [1,2], "5" => [5]
-	if (str.includes('-')) {
-		const [start, end] = str.split('-').map(Number);
-		const arr = [];
-		for (let i = start; i <= end; i++) arr.push(i);
-		return arr;
-	}
-	return [Number(str)];
-}
-
-
+/**
+ * Activates the extension and registers commands.
+ * @param context VSCode extension context.
+ */
 export function activate(context: vscode.ExtensionContext) {
+	// Command: Open Change Browser (webview for current file/line)
 	const openChangeBrowserDisposable = vscode.commands.registerCommand('devstry-viewer.openChangeBrowser', () => {
 		const panel = vscode.window.createWebviewPanel(
 			'devlogPanel',
@@ -56,32 +115,16 @@ export function activate(context: vscode.ExtensionContext) {
 			{ enableScripts: true }
 		);
 
-		function getWorkspaceRoot(): string | null {
-			const folders = vscode.workspace.workspaceFolders;
-			if (!folders || folders.length === 0) return null;
-			return folders[0].uri.fsPath;
-		}
-
-		function getLatestDevlogFile(): string | null {
-			const root = getWorkspaceRoot();
-			if (!root) return null;
-			const devlogDir = path.join(root, 'devLog');
-			if (!fs.existsSync(devlogDir) || !fs.statSync(devlogDir).isDirectory()) return null;
-			const files = fs.readdirSync(devlogDir)
-				.filter(f => f.endsWith('.md'))
-				.map(f => ({ name: f, time: fs.statSync(path.join(devlogDir, f)).mtime.getTime() }))
-				.sort((a, b) => b.time - a.time);
-			return files.length > 0 ? path.join(devlogDir, files[0].name) : null;
-		}
-
-		// Parse devlog for file and line, return change block(s) for that line
+		/**
+		 * Finds and returns change blocks for the current line in the devlog.
+		 * @param devlogPath Path to devlog markdown file.
+		 * @param fileName Name of the file being viewed.
+		 * @param line Line number in the file.
+		 */
 		function getChangeForLine(devlogPath: string, fileName: string, line: number): string {
 			const content = fs.readFileSync(devlogPath, 'utf8');
-			// Find section for file
-			const sectionRegex = new RegExp(`^##\\s+${escapeRegExp(fileName)}[\\s\\S]*?(?=^##\\s+|\\Z)`, 'm');
-			const sectionMatch = content.match(sectionRegex);
-			if (!sectionMatch) return 'No devlog section found for this file.';
-			const section = sectionMatch[0];
+			const section = getDevlogSection(content, fileName);
+			if (!section) return 'No devlog section found for this file.';
 
 			// Find all change blocks with line numbers
 			const changeBlockRegex = /\*\*Lines ([\d\-]+)\*\* \| \*\*(\d+) change tracked\*\*\n\n##### ([^\n]+)\n([\s\S]*?)(?=\n\*\*Lines|\n##|$)/g;
@@ -99,103 +142,49 @@ export function activate(context: vscode.ExtensionContext) {
 			return found ? result : 'No tracked change for this line.';
 		}
 
-		// removed duplicate parseLineRange, now top-level
-
-		function escapeRegExp(str: string): string {
-			return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-		}
-
+		/**
+		 * Updates the webview panel with the current file and line.
+		 */
 		const updatePanel = () => {
 			const editor = vscode.window.activeTextEditor;
 			const line = editor ? editor.selection.active.line + 1 : 1;
-			const file = editor ? vscode.workspace.asRelativePath(editor.document.uri) : '';
-			const devlogPath = getLatestDevlogFile();
-			let changeHtml = '<em>No devlog file found.</em>';
-			let hashHtml = '';
-			if (devlogPath && file) {
-				const fs = require('fs');
-				const path = require('path');
-				const marked = require('marked');
-				let devlogContent = "";
-				try {
-					devlogContent = fs.readFileSync(devlogPath, 'utf8');
-				} catch (e) {
-					console.error('[Devlog Section Debug] Failed to read devlog:', e);
-					changeHtml = `<div style="margin-top:1em;font-size:0.95em;color:#e00;">Could not read devlog file.</div>`;
-					hashHtml = "";
-					return;
-				}
-
-				// Manual section extraction for reliability
-				function escapeRegExp(str: string) {
-					return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-				}
-				const fileBasename = path.basename(file);
-				const sectionRegex = /^##\s+.*$/gm;
-				const headings: number[] = [];
-				let match;
-				while ((match = sectionRegex.exec(devlogContent)) !== null) {
-					headings.push(match.index);
-				}
-				let foundSection = "";
-				for (let i = 0; i < headings.length; i++) {
-					const headingLine = devlogContent.substring(headings[i], devlogContent.indexOf('\n', headings[i]));
-					if (headingLine.includes(fileBasename)) {
-						const start = headings[i];
-						const end = (i + 1 < headings.length) ? headings[i + 1] : devlogContent.length;
-						foundSection = devlogContent.substring(start, end);
-						break;
-					}
-				}
-
-				if (!foundSection) {
-					console.warn(`[Devlog Section Debug] No section found for file "${file}".`);
-					changeHtml = `<div style="margin-top:1em;font-size:0.95em;color:#e00;">No devlog section found for this file.</div>`;
-					hashHtml = "";
-				} else {
-					const renderedHtml = marked.parse(foundSection);
-					changeHtml = `<div style="font-size:1.05em;">${renderedHtml}</div>`;
-					hashHtml = "";
-				}
-			}
-			panel.webview.html = `
-			<!DOCTYPE html>
-			<html lang="en">
-			<head>
-				<meta charset="UTF-8">
-				<style>
-					body { font-family: sans-serif; padding: 2em; }
-					.file { font-size: 1.2em; color: #333; margin-bottom: 1em; }
-					.line { font-size: 2em; color: #007acc; margin-bottom: 1em; }
-					pre { background: #f6f8fa; padding: 1em; border-radius: 6px; }
-				</style>
-			</head>
-			<body>
-				<div class="file">File: <strong>${file || 'No file'}</strong></div>
-				<div class="line">Current Line: <strong>${line}</strong></div>
-				${changeHtml}
-				${hashHtml}
-			</body>
-			</html>
-		`;
+			const file = editor ? editor.document.uri.fsPath : '';
+			panel.webview.html = getDevlogPanelHtml(file, line);
 		};
 
 		updatePanel();
 
-		const selectionListener = vscode.window.onDidChangeTextEditorSelection(() => {
-			updatePanel();
-		});
-		const editorListener = vscode.window.onDidChangeActiveTextEditor(() => {
-			updatePanel();
-		});
+		// Listen for editor/selection changes to update panel
+		const selectionListener = vscode.window.onDidChangeTextEditorSelection(() => updatePanel());
+		const editorListener = vscode.window.onDidChangeActiveTextEditor(() => updatePanel());
 
 		panel.onDidDispose(() => {
 			selectionListener.dispose();
 			editorListener.dispose();
 		});
 	});
-
 	context.subscriptions.push(openChangeBrowserDisposable);
+
+	// Command: Open Recent Markdown (shows latest devlog file)
+	const openRecentMarkdownDisposable = vscode.commands.registerCommand('devstry-viewer.openRecentMarkdown', async () => {
+		const devlogPath = getLatestDevlogFile();
+		if (showWarningIf(!devlogPath, 'No devlog markdown files found.')) return;
+		vscode.window.showInformationMessage(`Would open: ${devlogPath}`);
+	});
+	context.subscriptions.push(openRecentMarkdownDisposable);
+
+	// Command: Select Markdown (lists all devlog markdown files)
+	const selectMarkdownDisposable = vscode.commands.registerCommand('devstry-viewer.selectMarkdown', async () => {
+		const devlogDir = getWorkspaceSubdirOrWarn('devLog', 'No devlog directory found.');
+		if (!devlogDir) return;
+		const files = getDevlogMarkdownFiles(devlogDir);
+		if (showWarningIf(files.length === 0, 'No devlog markdown files found.')) return;
+		vscode.window.showInformationMessage(`Would select: ${files.join(', ')}`);
+	});
+	context.subscriptions.push(selectMarkdownDisposable);
 }
 
+/**
+ * Deactivates the extension.
+ */
 export function deactivate() { }

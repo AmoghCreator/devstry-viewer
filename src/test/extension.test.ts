@@ -27,3 +27,39 @@ suite('Extension Test Suite', () => {
 	// 	// Setup: create devLog and markdown files, then run command
 	// });
 });
+
+// Test for getDevlogSection
+import { getDevlogSection } from '../devlogUtils';
+
+suite('getDevlogSection', () => {
+	test('extracts correct section between headings', () => {
+		const md = `
+## fileA
+Content A line 1
+Content A line 2
+
+## fileB
+Content B line 1
+Content B line 2
+
+## fileC
+Content C line 1
+`;
+		const sectionB = getDevlogSection(md, 'fileB');
+		// Should include heading and both lines, not include next heading
+		if (!sectionB.includes('Content B line 1') || !sectionB.includes('Content B line 2')) {
+			throw new Error('Section B content missing');
+		}
+		if (sectionB.includes('Content C line 1')) {
+			throw new Error('Section B includes next section');
+		}
+	});
+	test('returns empty string if section not found', () => {
+		const md = `
+## fileA
+Content A
+`;
+		const section = getDevlogSection(md, 'fileX');
+		if (section !== '') { throw new Error('Should return empty string for missing section'); }
+	});
+});
