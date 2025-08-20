@@ -52,7 +52,7 @@ function getDevlogPanelHtml(file: string, line: number): string {
 					cardsHtml = `
 						<div id="devlog-card-container" style="display: flex; overflow-x: auto; gap: 1.5em; padding-bottom: 1em;">
 							${cards.map(card => `
-								<div class="devlog-card" style="min-width:350px; max-width:400px; background:#fff; border-radius:10px; box-shadow:0 2px 8px #0002; padding:1em; margin-bottom:1em; flex:0 0 auto;">
+								<div class="devlog-card" style="min-width:350px; max-width:400px; background:#fff; border-radius:10px; box-shadow:0 2px 8px #0002; padding:1em; margin-bottom:1em; flex:0 0 auto; overflow-x:auto;">
 									<div class="markdown-body">${card}</div>
 								</div>
 							`).join('')}
@@ -76,7 +76,7 @@ function getDevlogPanelHtml(file: string, line: number): string {
                 .devlog-card { transition: box-shadow 0.2s; }
                 .devlog-card:hover { box-shadow: 0 4px 16px #007acc33; }
                 /* Github markdown style (minimal) */
-                .markdown-body table { border-collapse: collapse; width: 100%; margin-bottom: 1em; }
+                .markdown-body table { border-collapse: collapse; max-width: 100%; display: block; margin-bottom: 1em; overflow-x: auto; }
                 .markdown-body th, .markdown-body td { border: 1px solid #ddd; padding: 4px 8px; }
                 .markdown-body th { background: #f6f8fa; }
                 .markdown-body code { background: #f6f8fa; border-radius: 4px; padding: 2px 4px; }
