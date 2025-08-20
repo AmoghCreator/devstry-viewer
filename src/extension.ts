@@ -19,13 +19,33 @@ import { getWorkspaceRoot, getLatestDevlogFile, escapeRegExp, showWarningIf, get
  * @returns HTML string for the webview panel.
  */
 function getDevlogPanelHtml(file: string, line: number): string {
-	const devlogPath = getLatestDevlogFile();
-	let cardsHtml = '<em>No devlog file found.</em>';
+	// Get devlog directory (try 'devlog' and 'devLog')
+	const workspaceRoot = getWorkspaceRoot();
+	let cardsHtml = '<em>No devlog files found.</em>';
 
-	/**
-	 * Splits a devlog section into card entries.
-	 * Each card starts with a timestamp header: "##### YYYY-MM-DDTHH:MM:SS.sssZ"
-	 */
+	if (!workspaceRoot) {
+		cardsHtml = `<div style="margin-top:1em;font-size:0.95em;color:#e00;">Workspace root not found.</div>`;
+		return `
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <style>
+                    body { font-family: sans-serif; padding: 2em; background: #f4f6fa; }
+                </style>
+            </head>
+            <body>
+                ${cardsHtml}
+            </body>
+            </html>
+        `;
+	}
+
+	let devlogDir = path.join(workspaceRoot, 'devlog');
+	if (!fs.existsSync(devlogDir)) {
+		devlogDir = path.join(workspaceRoot, 'devLog');
+	}
+
 	function splitDevlogSectionToCards(section: string): string[] {
 		const cardRegex = /##### \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z[\s\S]*?(?=(?:\n##### \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)|$)/g;
 		const cards: string[] = [];
@@ -36,30 +56,48 @@ function getDevlogPanelHtml(file: string, line: number): string {
 		return cards;
 	}
 
-	if (devlogPath && file) {
-		const devlogContent = readDevlogFileSafe(devlogPath);
-		if (!devlogContent) {
-			cardsHtml = `<div style="margin-top:1em;font-size:0.95em;color:#e00;">Could not read devlog file.</div>`;
+	if (fs.existsSync(devlogDir) && file) {
+		// Get all markdown files with their full paths and stats
+		const files = fs.readdirSync(devlogDir)
+			.filter(f => f.endsWith('.md'))
+			.map(f => {
+				const fullPath = path.join(devlogDir, f);
+				const stat = fs.statSync(fullPath);
+				return { file: f, fullPath, mtime: stat.mtime };
+			})
+			.sort((a, b) => b.mtime.getTime() - a.mtime.getTime()); // Most recent first
+
+		if (files.length === 0) {
+			cardsHtml = `<div style="margin-top:1em;font-size:0.95em;color:#e00;">No devlog markdown files found.</div>`;
 		} else {
-			const section = getDevlogSection(devlogContent, file);
-			if (!section) {
-				cardsHtml = `<div style="margin-top:1em;font-size:0.95em;color:#e00;">No devlog section found for this file.</div>`;
-			} else {
+			cardsHtml = files.map(({ file: devlogFile, fullPath, mtime }) => {
+				const devlogContent = readDevlogFileSafe(fullPath);
+				if (!devlogContent) {
+					return `<div style="margin-top:1em;font-size:0.95em;color:#e00;">Could not read devlog file: ${devlogFile}</div>`;
+				}
+				const section = getDevlogSection(devlogContent, file);
+				if (!section) {
+					return `<div style="margin-top:1em;font-size:0.95em;color:#e00;">No devlog section found for this file in <strong>${devlogFile}</strong>.</div>`;
+				}
 				const cards = splitDevlogSectionToCards(section);
 				if (cards.length === 0) {
-					cardsHtml = `<div style="margin-top:1em;font-size:0.95em;color:#e00;">No devlog cards found for this file.</div>`;
-				} else {
-					cardsHtml = `
-						<div id="devlog-card-container" style="display: flex; overflow-x: auto; gap: 1.5em; padding-bottom: 1em;">
-							${cards.map(card => `
-								<div class="devlog-card" style="min-width:350px; max-width:400px; background:#fff; border-radius:10px; box-shadow:0 2px 8px #0002; padding:1em; margin-bottom:1em; flex:0 0 auto; overflow-x:auto;">
-									<div class="markdown-body">${card}</div>
-								</div>
-							`).join('')}
-						</div>
-					`;
+					return `<div style="margin-top:1em;font-size:0.95em;color:#e00;">No devlog cards found for this file in <strong>${devlogFile}</strong>.</div>`;
 				}
-			}
+				return `
+                    <section style="margin-bottom:2em;">
+                        <div style="font-size:1.1em;font-weight:bold;color:#007acc;margin-bottom:0.5em;">
+                            ${devlogFile} <span style="font-size:0.9em;color:#888;">(${mtime.toLocaleString()})</span>
+                        </div>
+                        <div id="devlog-card-container" style="display: flex; overflow-x: auto; gap: 1.5em; padding-bottom: 1em;">
+                            ${cards.map(card => `
+                                <div class="devlog-card" style="min-width:350px; max-width:400px; background:#fff; border-radius:10px; box-shadow:0 2px 8px #0002; padding:1em; margin-bottom:1em; flex:0 0 auto; overflow-x:auto;">
+                                    <div class="markdown-body">${card}</div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </section>
+                `;
+			}).join('');
 		}
 	}
 
