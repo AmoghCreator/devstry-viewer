@@ -3,6 +3,9 @@
   "displayName": "devstry-viewer",
   "description": "",
   "version": "0.0.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AmoghCreator/devstry-viewer"},
   "engines": {
     "vscode": "^1.103.0"
   },
